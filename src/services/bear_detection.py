@@ -1,109 +1,97 @@
 import os
 import cv2
 import numpy as np
-from ultralytics import YOLO
-from PIL import Image, ImageDraw, ImageFont
-import uuid
-from datetime import datetime
+from PIL import Image
+import requests
+import base64
+import json
 
 class BearDetectionService:
-    def __init__(self, model_path=None):
-        """
-        初始化台灣黑熊檢測服務
-        
-        Args:
-            model_path (str): YOLO模型檔案路徑，如果為None則使用預設模型
-        """
-        self.model_path = model_path
-        self.model = None
-        self.confidence_threshold = 0.5
-        self.load_model()
-    
-    def load_model(self):
-        """載入YOLO模型"""
-        try:
-            if self.model_path and os.path.exists(self.model_path):
-                # 載入用戶提供的訓練好的模型
-                self.model = YOLO(self.model_path)
-                print(f"成功載入自定義模型: {self.model_path}")
-            else:
-                # 使用預設的YOLOv8模型作為備用
-                self.model = YOLO('yolov8n.pt')
-                print("載入預設YOLOv8模型")
-        except Exception as e:
-            print(f"模型載入失敗: {str(e)}")
-            # 如果模型載入失敗，使用預設模型
-            self.model = YOLO('yolov8n.pt')
-    
-    def detect_bear(self, image_path, output_dir=None):
-        """
-        檢測圖片中的台灣黑熊
-        
-        Args:
-            image_path (str): 輸入圖片路徑
-            output_dir (str): 輸出目錄，如果為None則使用輸入圖片的目錄
-            
-        Returns:
-            dict: 檢測結果
-        """
+    def __init__(self):
+        # 從環境變數中獲取 Hugging Face API 資訊
+        self.hf_api_url = os.getenv("HF_API_URL", "")
+        self.hf_api_token = os.getenv("HF_API_TOKEN", "")
+        self.confidence_threshold = float(os.getenv("CONFIDENCE_THRESHOLD", 0.5))
+
+        if not self.hf_api_url or not self.hf_api_token:
+            print("警告：Hugging Face API URL 或 Token 未設定。請設定 HF_API_URL 和 HF_API_TOKEN 環境變數。")
+            # 如果沒有設定，可以提供一個預設的錯誤訊息或行為
+            # 或者在 detect_bear 方法中處理錯誤
+
+        # 確保上傳目錄存在
+        self.upload_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "static", "uploads")
+        os.makedirs(self.upload_folder, exist_ok=True)
+
+    def set_confidence_threshold(self, threshold):
+        self.confidence_threshold = threshold
+
+    def get_model_info(self):
+        # 由於模型在 Hugging Face 上，這裡返回模擬的模型資訊
+        # 實際的類別名稱應根據您的 Hugging Face 模型返回的結果來調整
+        return {
+            "model_type": "Hugging Face Inference API",
+            "model_path": self.hf_api_url,
+            "confidence_threshold": self.confidence_threshold,
+            "class_names": ["kumay", "bear", "black bear", "taiwan black bear"] # 這裡列出您的模型可能檢測到的類別
+        }
+
+    def detect_bear(self, image_path):
         try:
             if not os.path.exists(image_path):
                 raise FileNotFoundError(f"圖片檔案不存在: {image_path}")
+
+            # 讀取圖片並轉換為 Base64 編碼
+            with open(image_path, "rb") as f:
+                image_bytes = f.read()
+
+            headers = {
+                "Authorization": f"Bearer {self.hf_api_token}"
+            }
+
+            # 發送請求到 Hugging Face Inference API
+            response = requests.post(self.hf_api_url, headers=headers, data=image_bytes)
+            response.raise_for_status() # 如果請求失敗，會拋出異常
+
+            hf_results = response.json()
             
-            # 執行檢測
-            results = self.model(image_path, conf=self.confidence_threshold)
-            
-            # 分析檢測結果
-            bear_detected = False
-            max_confidence = 0.0
+            # 解析 Hugging Face 返回的結果
+            # Hugging Face 的物件檢測 API 返回格式通常是 [{box: {xmin, ymin, xmax, ymax}, score, label}, ...]
             detections = []
-            
-            for result in results:
-                boxes = result.boxes
-                if boxes is not None:
-                    for box in boxes:
-                        # 獲取類別名稱和信心度
-                        class_id = int(box.cls[0])
-                        confidence = float(box.conf[0])
-                        class_name = self.model.names[class_id]
-                        
-                        # 檢查是否為熊類（根據模型的類別名稱調整）
-                        if self._is_bear_class(class_name):
-                            bear_detected = True
-                            max_confidence = max(max_confidence, confidence)
-                            
-                            # 獲取邊界框座標
-                            x1, y1, x2, y2 = box.xyxy[0].tolist()
-                            detections.append({
-                                'class_name': class_name,
-                                'confidence': confidence,
-                                'bbox': [x1, y1, x2, y2]
-                            })
-            
-            # 生成結果圖片
+            bear_detected = False
+            for res in hf_results:
+                score = res.get("score", 0.0)
+                label = res.get("label", "unknown")
+                box = res.get("box", {})
+
+                if score >= self.confidence_threshold and self._is_bear_class(label):
+                    detections.append({
+                        "box": [box.get("xmin"), box.get("ymin"), box.get("xmax"), box.get("ymax")],
+                        "score": score,
+                        "label": label
+                    })
+                    bear_detected = True
+
+            # 繪製檢測結果並保存圖片
             result_image_path = None
-            if bear_detected and output_dir:
-                result_image_path = self._draw_detections(
-                    image_path, detections, output_dir
-                )
-            
+            if detections:
+                result_image_path = self._draw_detections(image_path, detections, self.upload_folder)
+
             return {
-                'bear_detected': bear_detected,
-                'confidence': max_confidence,
-                'detections': detections,
-                'result_image_path': result_image_path
+                "success": True,
+                "bear_detected": bear_detected,
+                "detections": detections,
+                "result_image_path": os.path.basename(result_image_path) if result_image_path else None
             }
-            
+
+        except FileNotFoundError as e:
+            return {"success": False, "error": str(e)}
+        except requests.exceptions.RequestException as e:
+            return {"success": False, "error": f"Hugging Face API 請求失敗: {e}"}
+        except json.JSONDecodeError:
+            return {"success": False, "error": "Hugging Face API 返回無效的 JSON"}
         except Exception as e:
-            print(f"檢測過程發生錯誤: {str(e)}")
-            return {
-                'bear_detected': False,
-                'confidence': 0.0,
-                'detections': [],
-                'result_image_path': None,
-                'error': str(e)
-            }
-    
+            return {"success": False, "error": f"檢測過程中發生錯誤: {e}"}
+
     def _is_bear_class(self, class_name):
         """
         判斷類別名稱是否為熊類
@@ -114,90 +102,66 @@ class BearDetectionService:
         Returns:
             bool: 是否為熊類
         """
-        bear_keywords = ['bear', '熊', 'black bear', '黑熊', 'taiwan black bear', '台灣黑熊', 'kumay']
+        # 這裡需要根據您的 Hugging Face 模型實際輸出的類別名稱來調整
+        # 例如，如果您的模型只輸出 'kumay'，那麼就只判斷 'kumay'
+        bear_keywords = ["kumay", "bear", "black bear", "taiwan black bear"]
         class_name_lower = class_name.lower()
         return any(keyword in class_name_lower for keyword in bear_keywords)
-    
+
     def _draw_detections(self, image_path, detections, output_dir):
-        """
-        在圖片上繪製檢測結果
-        
-        Args:
-            image_path (str): 原始圖片路徑
-            detections (list): 檢測結果列表
-            output_dir (str): 輸出目錄
+        # 確保輸出目錄存在
+        os.makedirs(output_dir, exist_ok=True)
+
+        # 讀取圖片
+        img = cv2.imread(image_path)
+        if img is None:
+            raise ValueError(f"無法讀取圖片: {image_path}")
+
+        # 複製圖片以繪製
+        img_display = img.copy()
+
+        # 繪製檢測框和標籤
+        for det in detections:
+            box = det["box"]
+            score = det["score"]
+            label = det["label"]
+
+            xmin, ymin, xmax, ymax = map(int, box)
+
+            # 繪製矩形框
+            color = (0, 255, 0)  # 綠色
+            thickness = 2
+            cv2.rectangle(img_display, (xmin, ymin), (xmax, ymax), color, thickness)
+
+            # 繪製標籤和分數
+            text = f"{label}: {score:.2f}"
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.7
+            font_thickness = 2
+            text_size = cv2.getTextSize(text, font, font_scale, font_thickness)[0]
             
-        Returns:
-            str: 結果圖片路徑
-        """
-        try:
-            # 讀取原始圖片
-            image = cv2.imread(image_path)
-            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            pil_image = Image.fromarray(image_rgb)
-            draw = ImageDraw.Draw(pil_image)
-            
-            # 設定字體（如果系統沒有字體檔案，使用預設字體）
-            try:
-                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
-            except:
-                font = ImageFont.load_default()
-            
-            # 繪製檢測框和標籤
-            for detection in detections:
-                x1, y1, x2, y2 = detection['bbox']
-                confidence = detection['confidence']
-                class_name = detection['class_name']
-                
-                # 繪製邊界框
-                draw.rectangle([x1, y1, x2, y2], outline="red", width=3)
-                
-                # 繪製標籤
-                label = f"{class_name}: {confidence:.2f}"
-                bbox = draw.textbbox((x1, y1-25), label, font=font)
-                draw.rectangle(bbox, fill="red")
-                draw.text((x1, y1-25), label, fill="white", font=font)
-            
-            # 保存結果圖片
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            result_filename = f"detection_result_{timestamp}_{uuid.uuid4().hex[:8]}.jpg"
-            result_path = os.path.join(output_dir, result_filename)
-            
-            # 轉換回BGR格式並保存
-            result_image_bgr = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
-            cv2.imwrite(result_path, result_image_bgr)
-            
-            return result_filename
-            
-        except Exception as e:
-            print(f"繪製檢測結果時發生錯誤: {str(e)}")
-            return None
-    
-    def set_confidence_threshold(self, threshold):
-        """
-        設定信心度閾值
-        
-        Args:
-            threshold (float): 信心度閾值 (0.0 - 1.0)
-        """
-        if 0.0 <= threshold <= 1.0:
-            self.confidence_threshold = threshold
-        else:
-            raise ValueError("信心度閾值必須在0.0到1.0之間")
-    
-    def get_model_info(self):
-        """
-        獲取模型資訊
-        
-        Returns:
-            dict: 模型資訊
-        """
-        if self.model:
-            return {
-                'model_path': self.model_path,
-                'model_type': str(type(self.model)),
-                'confidence_threshold': self.confidence_threshold,
-                'class_names': list(self.model.names.values()) if hasattr(self.model, 'names') else []
-            }
-        return None
+            # 確保文字背景框不會超出圖片邊界
+            text_bg_xmin = xmin
+            text_bg_ymin = ymin - text_size[1] - 5
+            text_bg_xmax = xmin + text_size[0]
+            text_bg_ymax = ymin - 5
+
+            if text_bg_ymin < 0: # 如果文字背景框超出圖片上方，則畫在框下方
+                text_bg_ymin = ymax + 5
+                text_bg_ymax = ymax + 5 + text_size[1]
+                text_bg_xmin = xmin
+                text_bg_xmax = xmin + text_size[0]
+
+            cv2.rectangle(img_display, (text_bg_xmin, text_bg_ymin), (text_bg_xmax, text_bg_ymax), color, -1) # -1 表示填充
+            cv2.putText(img_display, text, (text_bg_xmin, text_bg_ymax - 2), font, font_scale, (0, 0, 0), font_thickness, cv2.LINE_AA)
+
+        # 生成新的檔案名
+        base_name = os.path.basename(image_path)
+        name, ext = os.path.splitext(base_name)
+        output_filename = f"{name}_detected{ext}"
+        output_path = os.path.join(output_dir, output_filename)
+
+        # 保存結果圖片
+        cv2.imwrite(output_path, img_display)
+        return output_path
 
