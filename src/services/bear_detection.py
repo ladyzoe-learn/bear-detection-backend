@@ -5,6 +5,7 @@ from PIL import Image
 import requests
 import base64
 import json
+import mimetypes # 新增這一行
 
 class BearDetectionService:
     def __init__(self):
@@ -40,12 +41,19 @@ class BearDetectionService:
             if not os.path.exists(image_path):
                 raise FileNotFoundError(f"圖片檔案不存在: {image_path}")
 
-            # 讀取圖片並轉換為 Base64 編碼
+            # 讀取圖片的原始位元組數據
             with open(image_path, "rb") as f:
                 image_bytes = f.read()
 
+            # 根據檔案擴展名猜測 Content-Type
+            content_type, _ = mimetypes.guess_type(image_path)
+            if content_type is None:
+                # 如果無法猜測，預設為通用的二進位流
+                content_type = "application/octet-stream"
+
             headers = {
-                "Authorization": f"Bearer {self.hf_api_token}"
+                "Authorization": f"Bearer {self.hf_api_token}",
+                "Content-Type": content_type # 明確設定 Content-Type
             }
 
             # 發送請求到 Hugging Face Inference API
@@ -53,6 +61,9 @@ class BearDetectionService:
             response.raise_for_status() # 如果請求失敗，會拋出異常
 
             hf_results = response.json()
+            
+            # ... (以下程式碼保持不變)
+    
             
             # 解析 Hugging Face 返回的結果
             # Hugging Face 的物件檢測 API 返回格式通常是 [{box: {xmin, ymin, xmax, ymax}, score, label}, ...]
